@@ -6,7 +6,9 @@ import sys
 from datetime import date
 from pathlib import Path
 
+from .activity import ActivityError, list_activities, load_activity
 from .chat_log_sanitizer import hash_identifier
+from .demo import run_demo
 from .engine import AnswerEngine
 from .gitlink_issue_sync import GitLinkSyncError, sync_gitlink_issues
 from .knowledge import KnowledgeBase, KnowledgeValidationError
@@ -27,28 +29,34 @@ from .weflow_import import (
 
 def main(argv: list[str] | None = None) -> int:
     _configure_stdio()
-    parser = argparse.ArgumentParser(description="夏令营自动回复 agent 本地工具")
+    parser = argparse.ArgumentParser(description="活动答疑 agent 本地工具")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    ask_parser = subparsers.add_parser("ask", help="输入学生问题并生成建议回复")
-    ask_parser.add_argument("question", help="学生问题")
+    ask_parser = subparsers.add_parser("ask", help="输入参与者问题并生成建议回复")
+    ask_parser.add_argument("question", help="参与者问题")
     ask_parser.add_argument("--today", help="按 YYYY-MM-DD 指定当前日期，便于测试过期规则")
     ask_parser.add_argument("--knowledge", help="知识库 JSON 路径")
+    ask_parser.add_argument("--activity", default="summer-camp", help="活动包 ID，用 activities 命令查看")
     ask_parser.add_argument("--rag-index", default="data/rag/index", help="可选 RAG 索引目录")
     ask_parser.add_argument("--rag-provider", choices=["openai", "static"], default="openai", help="RAG 查询使用的 Embedding provider")
     ask_parser.add_argument("--rag-token-env", default="OPENAI_API_KEY", help="保存 OpenAI API Key 的环境变量名")
 
     review_parser = subparsers.add_parser("review", help="生成运营半自动审核卡")
-    review_parser.add_argument("question", help="学生问题")
+    review_parser.add_argument("question", help="参与者问题")
     review_parser.add_argument("--today", help="按 YYYY-MM-DD 指定当前日期，便于测试过期规则")
     review_parser.add_argument("--knowledge", help="知识库 JSON 路径")
+    review_parser.add_argument("--activity", default="summer-camp", help="活动包 ID，用 activities 命令查看")
     review_parser.add_argument("--pending-log", help="当建议标记待补充时，写入 JSONL 待确认清单")
     review_parser.add_argument("--rag-index", default="data/rag/index", help="可选 RAG 索引目录")
     review_parser.add_argument("--rag-provider", choices=["openai", "static"], default="openai", help="RAG 查询使用的 Embedding provider")
     review_parser.add_argument("--rag-token-env", default="OPENAI_API_KEY", help="保存 OpenAI API Key 的环境变量名")
 
     validate_parser = subparsers.add_parser("validate", help="校验知识库结构和自动回复安全字段")
-    validate_parser.add_argument("knowledge", nargs="?", help="知识库 JSON 路径，默认使用 data/faq.json")
+    validate_parser.add_argument("knowledge", nargs="?", help="知识库 JSON 路径，默认使用活动包知识库")
+    validate_parser.add_argument("--activity", default="summer-camp", help="活动包 ID，用 activities 命令查看")
+
+    subparsers.add_parser("activities", help="列出可切换的线上、线下和混合活动包")
+    subparsers.add_parser("demo", help="离线跑通线上、线下、混合活动包和夏令营参考包")
 
     import_weflow_parser = subparsers.add_parser("import-weflow", help="从 WeFlow 本地 API 导入微信群聊天记录")
     import_weflow_parser.add_argument("--group", required=True, help="微信群聊名称")
@@ -104,7 +112,11 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "review":
             return _review(args)
         if args.command == "validate":
-            return _validate(args.knowledge)
+            return _validate(args.knowledge, args.activity)
+        if args.command == "activities":
+            return _activities()
+        if args.command == "demo":
+            return _demo()
         if args.command == "import-weflow":
             return _import_weflow(args)
         if args.command == "rag-index":
@@ -116,6 +128,9 @@ def main(argv: list[str] | None = None) -> int:
     except KnowledgeValidationError as exc:
         print(f"知识库校验失败: {exc}", file=sys.stderr)
         return 1
+    except ActivityError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
     except RagEmbeddingError as exc:
         print(str(exc), file=sys.stderr)
         return 2
@@ -143,9 +158,18 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _ask(args: argparse.Namespace) -> int:
-    kb = _load_knowledge(args.knowledge)
+    profile = load_activity(args.activity)
+    kb = _load_knowledge(args.knowledge, profile.id)
     today = date.fromisoformat(args.today) if args.today else None
-    result = AnswerEngine(kb, today=today, rag_retriever=_optional_rag_retriever(args)).answer(args.question)
+    retriever = _optional_rag_retriever(args) if profile.id == "summer-camp" else None
+    result = AnswerEngine(
+        kb,
+        today=today,
+        rag_retriever=retriever,
+        organizer=profile.organizer,
+        notice_channel=profile.notice_channel,
+        assignment_contact=profile.assignment_contact,
+    ).answer(args.question)
     print(f"action: {result.action}")
     if result.intent:
         print(f"intent: {result.intent}")
@@ -160,16 +184,25 @@ def _ask(args: argparse.Namespace) -> int:
     return 0
 
 
-def _validate(path: str | None) -> int:
-    kb = _load_knowledge(path)
+def _validate(path: str | None, activity_id: str = "summer-camp") -> int:
+    kb = _load_knowledge(path, activity_id)
     print(f"知识库校验通过，共 {len(kb.items)} 条。")
     return 0
 
 
 def _review(args: argparse.Namespace) -> int:
-    kb = _load_knowledge(args.knowledge)
+    profile = load_activity(args.activity)
+    kb = _load_knowledge(args.knowledge, profile.id)
     today = date.fromisoformat(args.today) if args.today else None
-    engine = AnswerEngine(kb, today=today, rag_retriever=_optional_rag_retriever(args))
+    retriever = _optional_rag_retriever(args) if profile.id == "summer-camp" else None
+    engine = AnswerEngine(
+        kb,
+        today=today,
+        rag_retriever=retriever,
+        organizer=profile.organizer,
+        notice_channel=profile.notice_channel,
+        assignment_contact=profile.assignment_contact,
+    )
     card = OperatorReview(engine).create_card(args.question)
     pending_saved = False
     if args.pending_log and card.recommendation == "mark_pending":
@@ -273,10 +306,39 @@ def _print_review_card(card: ReviewCard, pending_saved: bool) -> None:
     print(card.reply)
 
 
-def _load_knowledge(path: str | None) -> KnowledgeBase:
+def _load_knowledge(path: str | None, activity_id: str = "summer-camp") -> KnowledgeBase:
     if path:
         return KnowledgeBase.from_json(Path(path))
-    return KnowledgeBase.from_default()
+    profile = load_activity(activity_id)
+    if profile.id == "summer-camp":
+        return KnowledgeBase.from_default()
+    return KnowledgeBase.from_json(profile.knowledge_path)
+
+
+def _activities() -> int:
+    for profile in list_activities():
+        print(f"{profile.id}\t{profile.format_label}\t{profile.name}")
+        print(profile.description)
+    return 0
+
+
+def _demo() -> int:
+    rows = run_demo()
+    for row in rows:
+        formats = "、".join("线上" if item == "online" else "线下" for item in row.formats)
+        print(f"activity: {row.activity_id}")
+        print(f"formats: {formats}")
+        print(f"question: {row.question}")
+        print(f"action: {row.action}")
+        if row.intent:
+            print(f"intent: {row.intent}")
+        print(f"ok: {str(row.ok).lower()}")
+        print("reply:")
+        print(row.reply)
+        print("---")
+    passed = sum(1 for row in rows if row.ok)
+    print(f"demo: {passed}/{len(rows)}")
+    return 0 if passed == len(rows) else 1
 
 
 def _configure_stdio() -> None:
