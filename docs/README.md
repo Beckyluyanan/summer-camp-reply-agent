@@ -1,4 +1,4 @@
-# 活动答疑 Agent 文档索引
+# 活动值守 Activity Desk 文档索引
 
 问答内核按活动包工作，线上活动、线下活动和混合活动使用同一套回复、转人工和资料过期规则。`summer-camp` 是参考活动包。新增活动的方法见仓库根目录 `README.md`。
 
@@ -25,7 +25,10 @@
 | 命令 | 说明 |
 | --- | --- |
 | `python -m unittest discover -s tests` | 运行完整测试 |
-| `python -m summer_camp_agent.cli activities` | 列出线上、线下和混合活动包 |
+| `python -m summer_camp_agent.cli activities` | 列出活动包和适用对象 |
+| `python -m summer_camp_agent.cli models` | 查看 FAQ 与可选模型 |
+| `python -m summer_camp_agent.cli check` | 检查全部活动包 |
+| `python -m summer_camp_agent.cli init-activity city-reading --name "城市阅读会" --formats offline --serves "读书会组织者,现场志愿者"` | 生成一场新活动的模板 |
 | `python -m summer_camp_agent.cli demo` | 离线演示各活动包的回复结果 |
 | `python -m summer_camp_agent.cli validate` | 校验默认知识库 `data/faq.json` |
 | `python scripts/validate_knowledge.py data/faq.json` | 使用脚本校验指定知识库 |

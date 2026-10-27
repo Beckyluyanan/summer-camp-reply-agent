@@ -21,7 +21,7 @@ def create_server(port: int = 8765, activity_id: str | None = None) -> tuple[Thr
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="活动答疑 Agent 本地能力服务")
+    parser = argparse.ArgumentParser(description="活动值守 Activity Desk 本地能力服务")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--activity", default="summer-camp", help="活动包 ID")
     args = parser.parse_args(argv)

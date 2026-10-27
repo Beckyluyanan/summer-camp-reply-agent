@@ -6,7 +6,16 @@ import sys
 from datetime import date
 from pathlib import Path
 
-from .activity import ActivityError, list_activities, load_activity
+from .activity import (
+    FORMAT_LABELS,
+    PRODUCT_NAME,
+    PRODUCT_NAME_EN,
+    ActivityError,
+    init_activity,
+    list_activities,
+    load_activity,
+    split_list,
+)
 from .chat_log_sanitizer import hash_identifier
 from .demo import run_demo
 from .engine import AnswerEngine
@@ -16,7 +25,7 @@ from .rag_documents import RagDocumentError
 from .rag_embeddings import DEFAULT_EMBEDDING_MODEL, RagEmbeddingError
 from .rag_index import RagIndexError, build_rag_index, load_rag_index
 from .rag_retriever import RagRetriever
-from .rag_runtime import create_embedding_provider, load_optional_rag_retriever
+from .rag_runtime import create_embedding_provider, load_optional_rag_retriever, model_status
 from .review import OperatorReview, ReviewCard, save_pending_question
 from .weflow_import import (
     WeFlowAuthError,
@@ -29,7 +38,7 @@ from .weflow_import import (
 
 def main(argv: list[str] | None = None) -> int:
     _configure_stdio()
-    parser = argparse.ArgumentParser(description="活动答疑 agent 本地工具")
+    parser = argparse.ArgumentParser(description=f"{PRODUCT_NAME} {PRODUCT_NAME_EN}：线上、线下和混合活动的咨询回复工具")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     ask_parser = subparsers.add_parser("ask", help="输入参与者问题并生成建议回复")
@@ -55,8 +64,15 @@ def main(argv: list[str] | None = None) -> int:
     validate_parser.add_argument("knowledge", nargs="?", help="知识库 JSON 路径，默认使用活动包知识库")
     validate_parser.add_argument("--activity", default="summer-camp", help="活动包 ID，用 activities 命令查看")
 
-    subparsers.add_parser("activities", help="列出可切换的线上、线下和混合活动包")
+    subparsers.add_parser("activities", help="列出活动包、形式和适用对象")
     subparsers.add_parser("demo", help="离线跑通线上、线下、混合活动包和夏令营参考包")
+    subparsers.add_parser("check", help="检查全部活动包能否被组织者和新贡献者复用")
+    subparsers.add_parser("models", help="说明哪些回复调用大模型，以及当前用的模型")
+    init_parser = subparsers.add_parser("init-activity", help="生成一场新活动的模板")
+    init_parser.add_argument("activity_id", help="小写英文 ID，例如 city-reading")
+    init_parser.add_argument("--name", required=True, help="活动名称")
+    init_parser.add_argument("--formats", required=True, help="online、offline，或 online,offline")
+    init_parser.add_argument("--serves", required=True, help="适用对象，逗号分隔。例如：社团负责人,值班志愿者")
 
     import_weflow_parser = subparsers.add_parser("import-weflow", help="从 WeFlow 本地 API 导入微信群聊天记录")
     import_weflow_parser.add_argument("--group", required=True, help="微信群聊名称")
@@ -117,6 +133,12 @@ def main(argv: list[str] | None = None) -> int:
             return _activities()
         if args.command == "demo":
             return _demo()
+        if args.command == "check":
+            return _check()
+        if args.command == "models":
+            return _models()
+        if args.command == "init-activity":
+            return _init_activity(args)
         if args.command == "import-weflow":
             return _import_weflow(args)
         if args.command == "rag-index":
@@ -179,6 +201,7 @@ def _ask(args: argparse.Namespace) -> int:
         print(f"source: {result.source}")
     if result.confidence:
         print(f"confidence: {result.confidence:.2f}")
+    print(f"model: {_model_label(result)}")
     print("reply:")
     print(result.reply)
     return 0
@@ -316,9 +339,56 @@ def _load_knowledge(path: str | None, activity_id: str = "summer-camp") -> Knowl
 
 
 def _activities() -> int:
+    print(f"{PRODUCT_NAME} {PRODUCT_NAME_EN}")
     for profile in list_activities():
         print(f"{profile.id}\t{profile.format_label}\t{profile.name}")
+        print(f"适用：{'、'.join(profile.serves)}")
         print(profile.description)
+    return 0
+
+
+def _check() -> int:
+    profiles = list_activities()
+    print(f"{PRODUCT_NAME} {PRODUCT_NAME_EN}")
+    covered = {item for profile in profiles for item in profile.formats}
+    print(f"活动包 {len(profiles)} 个，覆盖{'、'.join(FORMAT_LABELS[item] for item in ('online', 'offline') if item in covered)}。")
+    for profile in profiles:
+        count = len(KnowledgeBase.from_json(profile.knowledge_path).items)
+        print(f"{profile.id}\t{profile.format_label}\t{count} 条\t适用：{'、'.join(profile.serves)}")
+    print("新贡献者可以运行 init-activity 提交一场自己的活动，不必修改问答内核。")
+    print("demo 和 FAQ 回复不调用大模型。可选生成模型见 models 命令。")
+    return 0
+
+
+def _models() -> int:
+    status = model_status()
+    print(f"{PRODUCT_NAME} {PRODUCT_NAME_EN}")
+    print("日常回复：活动包 FAQ，用问句和关键词匹配，不调用大模型。")
+    print("demo、check、activities 都不调用大模型。")
+    print(f"可选语义判断和资料生成：{status['chat_model']}")
+    print(f"聊天接口：{status['chat_base_url']}")
+    print(f"可选向量检索：{status['embedding_model']}")
+    print(f"向量接口：{status['embedding_url']}")
+    print(f"OPENAI_API_KEY：{status['api_key']}")
+    print("没有密钥时，只使用 FAQ。更换聊天模型时设置 OPENAI_BASE_URL 和 OPENAI_CHAT_MODEL。")
+    return 0
+
+
+def _model_label(result) -> str:
+    if result.generation_mode == "rag_ai" and result.generation_model:
+        return result.generation_model
+    return "未调用"
+
+
+def _init_activity(args: argparse.Namespace) -> int:
+    target = init_activity(
+        args.activity_id,
+        args.name,
+        split_list(args.formats),
+        split_list(args.serves),
+    )
+    print(f"已生成活动包：{target}")
+    print("下一步：修改 faq.json 里的模板答案，然后运行 validate、ask 和 check。")
     return 0
 
 

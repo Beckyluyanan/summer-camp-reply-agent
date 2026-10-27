@@ -9,6 +9,7 @@
   "router_role": "混合活动咨询系统的语义路由器",
   "prompt_audience": "参与者",
   "assignment_contact": "活动工作人员",
+  "serves": ["开放日主办方", "线上会务", "现场会务"],
   "knowledge": "activities/hybrid-summit/faq.json",
   "description": "线上会场和线下会场同时进行。参与者可以只参加其中一种，个人报名状态仍转人工。"
 }
